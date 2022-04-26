@@ -1,4 +1,4 @@
-module github.com/reasland/azeventhub-promtail
+module github.com/dreweasland/azeventhub-promtail
 
 go 1.16
 
