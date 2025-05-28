@@ -23,6 +23,35 @@ import (
 	"github.com/prometheus/common/model"
 )
 
+// timestampHolder is a lightweight struct used to extract
+// potential timestamp fields from a log record without
+// allocating a map.
+type timestampHolder struct {
+	Time      string `json:"time"`
+	TimeStamp string `json:"timeStamp"`
+}
+
+// parseTimestamp tries to parse a timestamp from the given JSON data.
+// It checks both `time` and `timeStamp` fields and returns the first
+// successfully parsed value. If no valid timestamp exists, the zero
+// value of time.Time is returned.
+func parseTimestamp(data json.RawMessage) time.Time {
+	var ts timestampHolder
+	if err := json.Unmarshal(data, &ts); err != nil {
+		return time.Time{}
+	}
+	for _, val := range []string{ts.Time, ts.TimeStamp} {
+		if val == "" {
+			continue
+		}
+		if t, err := time.Parse(time.RFC3339Nano, val); err == nil {
+			return t
+		}
+		fmt.Printf("failed to parse timestamp: %q\n", val)
+	}
+	return time.Time{}
+}
+
 const (
 	contentType  = "application/x-protobuf"
 	maxErrMsgLen = 1024
@@ -66,43 +95,28 @@ func init() {
 func main() {
 	handler := func(ctx context.Context, event *eventhub.Event) error {
 		text := event.Data
-		var result map[string][]interface{}
+		var result map[string][]json.RawMessage
 		if err := json.Unmarshal(text, &result); err != nil {
 			return err
+		}
+
+		labelSet := model.LabelSet{
+			model.LabelName("__az_eventhub_namespace"): model.LabelValue(hubParse.Namespace),
+			model.LabelName("__az_eventhub_hub"):       model.LabelValue(hubParse.HubName),
 		}
 
 		for _, records := range result {
 			entries := make([]logproto.Entry, 0, len(records))
 
 			for _, data := range records {
-				remarshalledJSON, _ := json.Marshal(&data)
-				entryTimestamp := time.Now()
-				timestampFields := []string{"time", "timeStamp"}
-
-				if logMap, ok := data.(map[string]interface{}); ok {
-					for _, field := range timestampFields {
-						if tsRaw, exists := logMap[field]; exists {
-							if tsStr, ok := tsRaw.(string); ok {
-								if parsedTime, err := time.Parse(time.RFC3339Nano, tsStr); err == nil {
-									entryTimestamp = parsedTime
-									break
-								} else {
-									fmt.Printf("failed to parse timestamp in '%s': %v\n", field, tsStr)
-								}
-							}
-						}
-					}
+				ts := parseTimestamp(data)
+				if ts.IsZero() {
+					ts = time.Now()
 				}
-
 				entries = append(entries, logproto.Entry{
-					Timestamp: entryTimestamp,
-					Line:      string(remarshalledJSON),
+					Timestamp: ts,
+					Line:      string(data),
 				})
-			}
-
-			labelSet := model.LabelSet{
-				model.LabelName("__az_eventhub_namespace"): model.LabelValue(hubParse.Namespace),
-				model.LabelName("__az_eventhub_hub"):       model.LabelValue(hubParse.HubName),
 			}
 
 			stream := logproto.Stream{
